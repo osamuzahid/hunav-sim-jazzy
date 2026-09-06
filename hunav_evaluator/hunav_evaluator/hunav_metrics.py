@@ -331,6 +331,261 @@ def social_space_intrusions(
     return [percentage, slist]
 
 
+# Arena 5.0 Table II (RSS 2025): "Time in personal space" / private zone.
+# Radius 0.5 m centre-to-centre was introduced in Arena 3.0 and is still
+# the published definition. Not Hall intimate (surface-gap < 0.45 m).
+ARENA_PRIVATE_ZONE_RADIUS_M = 0.5
+# Facing / seen-by: Arena never publishes a FOV. Disclose ±90° (front half-plane).
+ARENA_FACING_HALF_ANGLE_RAD = math.pi / 2.0
+# "Straight towards" is tighter than facing. Disclose ±30°.
+ARENA_TOWARDS_HALF_ANGLE_RAD = math.pi / 6.0
+ARENA_TOWARDS_MIN_STEP_M = 0.01
+
+
+def _yaw_from_orientation(pose: Pose) -> float:
+    """Chassis yaw from Pose quaternion. Same formula as drive_stretch_waypoints (#68).
+
+    Do not use Agent.yaw for Stretch — hunav_agent_manager may rewrite it.
+    """
+    w = float(pose.orientation.w)
+    x = float(pose.orientation.x)
+    y = float(pose.orientation.y)
+    z = float(pose.orientation.z)
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _bearing(from_pose: Pose, to_pose: Pose) -> float:
+    return math.atan2(
+        to_pose.position.y - from_pose.position.y,
+        to_pose.position.x - from_pose.position.x,
+    )
+
+
+def _in_cone(heading: float, bearing: float, half_angle: float) -> bool:
+    return abs(shortest_angular_distance(heading, bearing)) <= half_angle
+
+
+def _ticks_to_seconds(ticks: List[int], agents: List[Agents]) -> float:
+    if not ticks or not agents:
+        return 0.0
+    stamps = get_time_stamps(agents, [])
+    time_s = 0.0
+    n = min(len(ticks), len(stamps))
+    for i in range(n):
+        if not ticks[i]:
+            continue
+        if i + 1 < n:
+            dt = stamps[i + 1] - stamps[i]
+        elif i > 0:
+            dt = stamps[i] - stamps[i - 1]
+        else:
+            dt = 0.0
+        time_s += max(dt, 0.0)
+    return time_s
+
+
+def _arena_private_zone_ticks(
+    agents: List[Agents], robot: List[Agent]
+) -> List[int]:
+    """Per-tick 1 if any pedestrian is within 0.5 m centre-to-centre of the robot."""
+    ticks = [0] * len(robot)
+    n = min(len(robot), len(agents))
+    for i in range(n):
+        min_cc = np.inf
+        for agent in agents[i].agents:
+            d = euclidean_distance(robot[i].position, agent.position)
+            if d < min_cc:
+                min_cc = d
+        if min_cc < ARENA_PRIVATE_ZONE_RADIUS_M:
+            ticks[i] = 1
+    return ticks
+
+
+def arena_private_zone_intrusions(
+    agents: List[Agents], robot: List[Agent]
+) -> List:
+    """Percentage of ticks the robot is inside Arena 5.0's 0.5 m private zone.
+
+    Comparable to intimate_space_intrusions (Hall 0.45 m surface-gap).
+    Arena 5.0 Table II lists both personal/private-zone time [s] and intimate-space %.
+    """
+    if not robot:
+        return [0.0, []]
+    ticks = _arena_private_zone_ticks(agents, robot)
+    percentage = 100.0 * float(sum(ticks)) / float(len(ticks))
+    rclpy.logging.get_logger("hunav_evaluator").debug(
+        f"Arena_private_zone_intrusions: {percentage:.2f} % of ticks "
+        f"(centre-to-centre < {ARENA_PRIVATE_ZONE_RADIUS_M} m)"
+    )
+    return [percentage, ticks]
+
+
+def arena_private_zone_time(
+    agents: List[Agents], robot: List[Agent]
+) -> List:
+    """Seconds the robot spends in Arena 5.0's personal/private zone (0.5 m)."""
+    if not robot or not agents:
+        return [0.0, []]
+    ticks = _arena_private_zone_ticks(agents, robot)
+    time_s = _ticks_to_seconds(ticks, agents)
+    rclpy.logging.get_logger("hunav_evaluator").debug(
+        f"Arena_private_zone_time: {time_s:.2f} s"
+    )
+    return [time_s, ticks]
+
+
+def arena_max_speed_in_intimate_space(
+    agents: List[Agents], robot: List[Agent]
+) -> List:
+    """Arena 5.0 Table II: max robot speed while in Hall intimate space (surface-gap < 0.45 m)."""
+    if not robot:
+        return [0.0]
+    _pct, ticks = space_intrusions(agents, robot, SpaceType.INTIMATE)
+    vmax = 0.0
+    n = min(len(ticks), len(robot))
+    for i in range(n):
+        if ticks[i]:
+            vmax = max(vmax, abs(float(robot[i].linear_vel)))
+    rclpy.logging.get_logger("hunav_evaluator").debug(
+        f"Arena_max_speed_in_intimate_space: {vmax:.3f} m/s"
+    )
+    return [vmax]
+
+
+def arena_path_efficiency(agents: List[Agents], robot: List[Agent]) -> List:
+    """Arena 5.0 Table II: start–goal chord / path length (1 = straight)."""
+    if len(robot) < 2:
+        return [0.0]
+    plen = robot_path_length(agents, robot)[0]
+    if plen <= 0.0:
+        return [0.0]
+    goal_pose = robot[-1].goals[0] if robot[-1].goals else robot[-1].position
+    chord = euclidean_distance(robot[0].position, goal_pose)
+    eff = float(chord) / float(plen)
+    rclpy.logging.get_logger("hunav_evaluator").debug(
+        f"Arena_path_efficiency: {eff:.3f} (chord {chord:.2f} / path {plen:.2f})"
+    )
+    return [eff]
+
+
+def arena_angle_over_length(agents: List[Agents], robot: List[Agent]) -> List:
+    """Arena 5.0 Table II: cumulative heading change / path length [rad/m].
+
+    Uses Agent.yaw (same as cumulative_heading_changes). Not Menger curvature.
+    """
+    if len(robot) < 2:
+        return [0.0]
+    plen = robot_path_length(agents, robot)[0]
+    if plen <= 0.0:
+        return [0.0]
+    chc = cumulative_heading_changes(agents, robot)[0]
+    val = float(chc) / float(plen)
+    rclpy.logging.get_logger("hunav_evaluator").debug(
+        f"Arena_angle_over_length: {val:.4f} rad/m"
+    )
+    return [val]
+
+
+def _arena_facing_ticks(agents: List[Agents], robot: List[Agent]) -> List[int]:
+    """Robot chassis yaw vs bearing to any person (front half-plane)."""
+    ticks = [0] * len(robot)
+    n = min(len(robot), len(agents))
+    for i in range(n):
+        heading = _yaw_from_orientation(robot[i].position)
+        for agent in agents[i].agents:
+            brg = _bearing(robot[i].position, agent.position)
+            if _in_cone(heading, brg, ARENA_FACING_HALF_ANGLE_RAD):
+                ticks[i] = 1
+                break
+    return ticks
+
+
+def _arena_seen_by_ticks(agents: List[Agents], robot: List[Agent]) -> List[int]:
+    """Person Agent.yaw (HuNav facing) vs bearing to the robot."""
+    ticks = [0] * len(robot)
+    n = min(len(robot), len(agents))
+    for i in range(n):
+        for agent in agents[i].agents:
+            brg = _bearing(agent.position, robot[i].position)
+            if _in_cone(float(agent.yaw), brg, ARENA_FACING_HALF_ANGLE_RAD):
+                ticks[i] = 1
+                break
+    return ticks
+
+
+def arena_time_facing_pedestrians(
+    agents: List[Agents], robot: List[Agent]
+) -> List:
+    """Arena 5.0 Table II: seconds the robot front half-plane contains a person.
+
+    Taped on: robot heading from position.orientation (#68), not Agent.yaw.
+    Cone ±90° — Arena does not publish a FOV.
+    """
+    if not robot:
+        return [0.0, []]
+    ticks = _arena_facing_ticks(agents, robot)
+    time_s = _ticks_to_seconds(ticks, agents)
+    rclpy.logging.get_logger("hunav_evaluator").debug(
+        f"Arena_time_facing_pedestrians: {time_s:.2f} s"
+    )
+    return [time_s, ticks]
+
+
+def arena_time_seen_by_pedestrians(
+    agents: List[Agents], robot: List[Agent]
+) -> List:
+    """Arena 5.0 Table II: seconds any person's HuNav yaw contains the robot.
+
+    Taped on: body/SFM yaw (USD−π/2), not AnimGraph gaze. Cone ±90°.
+    """
+    if not robot:
+        return [0.0, []]
+    ticks = _arena_seen_by_ticks(agents, robot)
+    time_s = _ticks_to_seconds(ticks, agents)
+    rclpy.logging.get_logger("hunav_evaluator").debug(
+        f"Arena_time_seen_by_pedestrians: {time_s:.2f} s"
+    )
+    return [time_s, ticks]
+
+
+def arena_movement_towards_pedestrians(
+    agents: List[Agents], robot: List[Agent]
+) -> List:
+    """Arena 5.0 Table II: % of path length whose step points within ±30° of a person.
+
+    Uses pose deltas (kinematic Stretch has no reliable PhysX linear_vel).
+    """
+    if len(robot) < 2:
+        return [0.0, []]
+    n = min(len(robot), len(agents))
+    ticks = [0] * len(robot)
+    towards = 0.0
+    total = 0.0
+    for i in range(n - 1):
+        ds = euclidean_distance(robot[i + 1].position, robot[i].position)
+        total += ds
+        if ds < ARENA_TOWARDS_MIN_STEP_M:
+            continue
+        step_yaw = math.atan2(
+            robot[i + 1].position.position.y - robot[i].position.position.y,
+            robot[i + 1].position.position.x - robot[i].position.position.x,
+        )
+        hit = False
+        for agent in agents[i].agents:
+            brg = _bearing(robot[i].position, agent.position)
+            if _in_cone(step_yaw, brg, ARENA_TOWARDS_HALF_ANGLE_RAD):
+                hit = True
+                break
+        if hit:
+            ticks[i] = 1
+            towards += ds
+    pct = 0.0 if total <= 0.0 else 100.0 * towards / total
+    rclpy.logging.get_logger("hunav_evaluator").debug(
+        f"Arena_movement_towards_pedestrians: {pct:.2f} % of path"
+    )
+    return [pct, ticks]
+
+
 def detect_groups(agents: List[Agents]) -> List[int]:
     """
     Detects unique group IDs from the agents and returns a list of those IDs.
@@ -964,6 +1219,14 @@ metrics = {
     "intimate_space_intrusions": intimate_space_intrusions,
     "personal_space_intrusions": personal_space_intrusions,
     "social_space_intrusions": social_space_intrusions,
+    "arena_private_zone_intrusions": arena_private_zone_intrusions,
+    "arena_private_zone_time": arena_private_zone_time,
+    "arena_max_speed_in_intimate_space": arena_max_speed_in_intimate_space,
+    "arena_path_efficiency": arena_path_efficiency,
+    "arena_angle_over_length": arena_angle_over_length,
+    "arena_time_facing_pedestrians": arena_time_facing_pedestrians,
+    "arena_time_seen_by_pedestrians": arena_time_seen_by_pedestrians,
+    "arena_movement_towards_pedestrians": arena_movement_towards_pedestrians,
     "group_intimate_space_intrusions": group_intimate_space_intrusions,
     "group_personal_space_intrusions": group_personal_space_intrusions,
     "group_social_space_intrusions": group_social_space_intrusions,

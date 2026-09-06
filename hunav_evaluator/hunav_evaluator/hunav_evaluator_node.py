@@ -220,11 +220,11 @@ class HunavEvaluatorNode(Node):
             ag = Agents()  # create a new Agents message
             ag.header = la.header  # copy the header from the Agents message
             for a in la.agents:  # iterate over the agents in the Agents message
-                if a.behavior == behavior:  # check if the agent has the behavior
+                # PATCH (isaac-social-nav): compare behavior.type (uint8), not the
+                # whole AgentBehavior message to an int (always false → no beh_*.csv).
+                if int(a.behavior.type) == int(behavior):
                     ag.agents.append(a)  # add the agent to the Agents message
-                if (
-                    a.behavior.state != a.behavior.BEH_NO_ACTIVE
-                ):  # check if the agent is active
+                if int(a.behavior.state) != 0:  # BEH_NO_ACTIVE
                     beh_active[i] = 1
             if len(ag.agents) > 0:  # if there are agents with the behavior
                 beh_agents.append(ag)
