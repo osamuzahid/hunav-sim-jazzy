@@ -8,12 +8,28 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+# ---------------------------------------------------------------------------
+# ORIGINALLY (upstream v1.0-humble): did not find_package these; ament_target
+# deps were only:
+#   rclcpp hunav_msgs people_msgs geometry_msgs visualization_msgs
+#   nav2_behavior_tree tf2 tf2_ros behaviortree_cpp
+# (and hunav_loader: rclcpp hunav_msgs only)
+# Had to be patched because building on ROS 2 Jazzy failed without explicit
+# ament_index_cpp / std_msgs / tf2_geometry_msgs linkage (Humble-era package
+# metadata under-declared deps that the code actually uses).
+# ---------------------------------------------------------------------------
+# PATCH (isaac-social-nav): add the missing find_package + ament deps so
+# hunav_agent_manager / hunav_loader link on Jazzy. Important for /compute_agents.
+# ---------------------------------------------------------------------------
+find_package(ament_index_cpp REQUIRED)
 find_package(hunav_msgs REQUIRED)
 find_package(people_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED) 
 find_package(visualization_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 find_package(nav2_behavior_tree REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 
@@ -24,14 +40,19 @@ include_directories(
 )
 
 add_executable(hunav_agent_manager src/agent_manager_node.cpp src/agent_manager.cpp src/time_expired_condition.cpp src/bt_functions.cpp src/bt_node.cpp)
-ament_target_dependencies(hunav_agent_manager rclcpp hunav_msgs people_msgs geometry_msgs visualization_msgs nav2_behavior_tree tf2 tf2_ros behaviortree_cpp)
+# ORIGINALLY:
+# ament_target_dependencies(hunav_agent_manager rclcpp hunav_msgs people_msgs geometry_msgs visualization_msgs nav2_behavior_tree tf2 tf2_ros behaviortree_cpp)
+# PATCH: include ament_index_cpp, std_msgs, tf2_geometry_msgs (Jazzy build).
+ament_target_dependencies(hunav_agent_manager rclcpp ament_index_cpp hunav_msgs people_msgs geometry_msgs visualization_msgs std_msgs nav2_behavior_tree tf2 tf2_ros tf2_geometry_msgs behaviortree_cpp)
 
 
 #add_executable(test_agent_manager src/test_agent_manager_node.cpp)
 #ament_target_dependencies(test_agent_manager rclcpp hunav_msgs geometry_msgs tf2_geometry_msgs tf2 tf2_ros)
 
 add_executable(hunav_loader src/hunav_loader.cpp)
-ament_target_dependencies(hunav_loader rclcpp hunav_msgs)
+# ORIGINALLY: ament_target_dependencies(hunav_loader rclcpp hunav_msgs)
+# PATCH: also ament_index_cpp (used for share-path lookup on Jazzy).
+ament_target_dependencies(hunav_loader rclcpp ament_index_cpp hunav_msgs)
 
 
 # if(BUILD_TESTING)

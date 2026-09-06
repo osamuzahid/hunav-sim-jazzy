@@ -9,16 +9,36 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <!--
+    ORIGINALLY (upstream v1.0-humble):
+      <depend>rclcpp</depend>
+      <depend>geometry_msgs</depend>
+      <depend>visualization_msgs</depend>
+      <depend>hunav_msgs</depend>
+      <depend>people_msgs</depend>
+      <depend>nav2_behavior_tree</depend>
+      <depend>behaviortree_cpp</depend>
+      <exec_depend>tf2_geometry_msgs</exec_depend>
+      <exec_depend>tf2</exec_depend>
+      <exec_depend>tf_transformations</exec_depend>
+    Had to be patched: Jazzy build needs ament_index_cpp / std_msgs as <depend>,
+    and tf2 / tf2_ros / tf2_geometry_msgs as full <depend> (not exec-only) so
+    linking matches what the C++ sources use.
+    PATCH (isaac-social-nav): declare those deps so colcon/rosdep resolve on Jazzy.
+  -->
   <depend>rclcpp</depend>
+  <depend>ament_index_cpp</depend>
   <depend>geometry_msgs</depend>
   <depend>visualization_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>hunav_msgs</depend>
   <depend>people_msgs</depend>
   <depend>nav2_behavior_tree</depend>
   <depend>behaviortree_cpp</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
 
-  <exec_depend>tf2_geometry_msgs</exec_depend>
-  <exec_depend>tf2</exec_depend>
   <exec_depend>tf_transformations</exec_depend>
 
   <!--<test_depend>ament_lint_auto</test_depend>

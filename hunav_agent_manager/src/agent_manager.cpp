@@ -57,55 +57,54 @@ float AgentManager::robotSquaredDistance(int id)
 
 bool AgentManager::lineOfSight(int id)
 {
-  // mutex_.lock();
-  float ax = agents_[id].sfmAgent.position.getX();
-  float ay = agents_[id].sfmAgent.position.getY();
-  float rx = robot_.sfmAgent.position.getX();
-  float ry = robot_.sfmAgent.position.getY();
-  double yaw = agents_[id].sfmAgent.yaw.toRadian();
-  // tf2::Quaternion q(
-  //     agents_[id].position.orientation.x, agents_[id].position.orientation.y,
-  //     agents_[id].position.orientation.z,
-  //     agents_[id].position.orientation.w);
-  // mutex_.unlock();
-  // tf2::Matrix3x3 m(q);
-  // double roll, pitch, yaw;
-  // m.getRPY(roll, pitch, yaw);
-  float nrx = (rx - ax) * cos(yaw) + (ry - ay) * sin(yaw);
-  float nry = -(rx - ax) * sin(yaw) + (ry - ay) * cos(yaw);
-  float rangle = atan2(nry, nrx);
-
-  if (abs(rangle) > (M_PI / 2.0 + 0.17))
-  {
-    // std::cout << "[AgentManager.lineOfSight] Agent " << id + 1
-    //           << " can NOT see the robot!" << std::endl;
-    return false;
-  }
-  else
-  {
-    // std::cout << "[AgentManager.lineOfSight] Agent " << id + 1
-    //           << " is seeing the robot!" << std::endl;
-
-    // ----------------------------------------
-    // TODO: do raytracing to check visibility
-    // ----------------------------------------
-
-    return true;
-  }
+  // ---------------------------------------------------------------------------
+  // ORIGINALLY (upstream): front FOV only — robot must lie within ~±90° of the
+  // agent's current yaw (plus 0.17 rad). That breaks Scared: avoidRobot faces
+  // AWAY from the robot → next tick IsRobotVisible is false → Fallback to
+  // RegularNav → yaw flips toward the robot → Scared again → ~180° thrash.
+  // The BT already gates on distance; keep awareness omnidirectional here.
+  // ---------------------------------------------------------------------------
+  // PATCH (isaac-social-nav): always true once within the distance check.
+  (void)id;
+  return true;
+  // ORIGINALLY:
+  // float ax = agents_[id].sfmAgent.position.getX();
+  // float ay = agents_[id].sfmAgent.position.getY();
+  // float rx = robot_.sfmAgent.position.getX();
+  // float ry = robot_.sfmAgent.position.getY();
+  // double yaw = agents_[id].sfmAgent.yaw.toRadian();
+  // float nrx = (rx - ax) * cos(yaw) + (ry - ay) * sin(yaw);
+  // float nry = -(rx - ax) * sin(yaw) + (ry - ay) * cos(yaw);
+  // float rangle = atan2(nry, nrx);
+  // if (abs(rangle) > (M_PI / 2.0 + 0.17)) return false;
+  // return true;
 }
 
 bool AgentManager::isRobotVisible(int id, double dist)
 {
   std::lock_guard<std::mutex> guard(mutex_);
-  float squared_dist = robotSquaredDistance(id);
-  if (squared_dist <= (dist * dist))
+  float d = sqrt(robotSquaredDistance(id));
+  // PATCH (isaac-social-nav): hysteresis / latch.
+  // Scared was: flee a bit → unlatch → Regular patrol back in → flee again
+  // (GUI: turn away, walk a second, turn back, repeat). For once:true
+  // behaviours, keep latched so the BT timer owns the reaction end — no
+  // re-arming mid-duration.
+  const double release = dist + 1.5;
+  if (robot_visible_latched_[id])
   {
-    return lineOfSight(id);
+    if (agents_[id].behavior.once)
+      return true;
+    if (d > release)
+      robot_visible_latched_[id] = false;
+    else
+      return true;
   }
-  else
+  if (d <= dist && lineOfSight(id))
   {
-    return false;
+    robot_visible_latched_[id] = true;
+    return true;
   }
+  return false;
 }
 
 // void AgentManager::isRobotVisible(
@@ -124,29 +123,15 @@ void AgentManager::lookAtTheRobot(int id)
   // Agent position
   float ax = agents_[id].sfmAgent.position.getX();
   float ay = agents_[id].sfmAgent.position.getY();
-  float ah = agents_[id].sfmAgent.yaw.toRadian();
-  // Transform robot position to agent coords system
-  float nrx = (rx - ax) * cos(ah) + (ry - ay) * sin(ah);
-  float nry = -(rx - ax) * sin(ah) + (ry - ay) * cos(ah);
-  utils::Angle robotYaw;  // = utils::Angle::fromRadian(atan2(nry, nrx));
-  robotYaw.setRadian(atan2(nry, nrx));
-
-  // Change the angle step by step according to
-  // the time_step_secs_ and a maximum angular vel
-  float max_ang_vel = M_PI;                                               // rad/secs
-  utils::Angle max_angle = utils::Angle::fromRadian(max_ang_vel * 0.01);  // time_step_secs_);
-  if (robotYaw.sign() < 0)
-    max_angle.setRadian(max_angle.toRadian() * (-1));
-
-  // Update the agent angle
-  if (fabs(robotYaw.toRadian()) > max_angle.toRadian())
-  {
-    agents_[id].sfmAgent.yaw = (agents_[id].sfmAgent.yaw + max_angle);
-  }
-  else
-  {
-    agents_[id].sfmAgent.yaw = agents_[id].sfmAgent.yaw + robotYaw;
-  }
+  // PATCH (isaac-social-nav): absolute world heading toward robot (see approximateRobot).
+  utils::Angle face;
+  face.setRadian(atan2(ry - ay, rx - ax));
+  agents_[id].sfmAgent.yaw = face;
+  // PATCH (isaac-social-nav): freeze must clear linear velocity — otherwise Isaac
+  // keeps WalkLoop playing while position never updates (look-only / no updatePosition).
+  agents_[id].sfmAgent.velocity.set(0.0, 0.0);
+  agents_[id].sfmAgent.linearVelocity = 0.0;
+  agents_[id].sfmAgent.angularVelocity = 0.0;
   agents_[id].behavior.state = 1;
 }
 
@@ -161,48 +146,113 @@ void AgentManager::approximateRobot(int id, double dt, double closest_dist, doub
   float ry = robot_.sfmAgent.position.getY();
   float dist = sqrt(robotSquaredDistance(id));
 
-  // if the agent is close to the robot,
-  // stop and look at the robot
-  if (dist <= closest_dist)  // 1.5
+  // PATCH (isaac-social-nav): hysteresis around stop distance. Without it the
+  // agent surges in (goal=robot), crosses closest_dist, stops, drifts out,
+  // surges again → sudden speed-up + thrash at ~1.5 m.
+  const double release_dist = closest_dist + 2.5;
+  bool holding = curious_holding_[id];
+  if (holding)
   {
-    // printf("Agent %i stoping and looking at the robot! dist: %.2f\n", id,
-    // dist);
-    // Agent position
+    if (dist > release_dist)
+    {
+      curious_holding_[id] = false;
+      curious_hold_xy_.erase(id);
+      holding = false;
+    }
+  }
+  else if (dist <= closest_dist)
+  {
+    curious_holding_[id] = true;
+    holding = true;
     float ax = agents_[id].sfmAgent.position.getX();
     float ay = agents_[id].sfmAgent.position.getY();
-    float ah = agents_[id].sfmAgent.yaw.toRadian();
-    // Transform robot position to agent coords system
-    float nrx = (rx - ax) * cos(ah) + (ry - ay) * sin(ah);
-    float nry = -(rx - ax) * sin(ah) + (ry - ay) * cos(ah);
-    utils::Angle robotYaw;  // = utils::Angle::fromRadian(atan2(nry, nrx));
-    robotYaw.setRadian(atan2(nry, nrx));
+    // Pin on the stop ring (not closer) so we never walk into the robot.
+    if (dist > 1e-3)
+    {
+      float s = static_cast<float>(closest_dist / dist);
+      curious_hold_xy_[id] = {rx + (ax - rx) * s, ry + (ay - ry) * s};
+    }
+    else
+    {
+      curious_hold_xy_[id] = {ax, ay};
+    }
+  }
 
-    agents_[id].sfmAgent.yaw = agents_[id].sfmAgent.yaw + robotYaw;
+  if (holding)
+  {
+    auto hold = curious_hold_xy_[id];
+    agents_[id].sfmAgent.position.set(hold.first, hold.second);
+    float ax = hold.first;
+    float ay = hold.second;
+    utils::Angle face;
+    face.setRadian(atan2(ry - ay, rx - ax));
+    agents_[id].sfmAgent.yaw = face;
+    agents_[id].sfmAgent.velocity.set(0.0, 0.0);
+    agents_[id].sfmAgent.linearVelocity = 0.0;
+    agents_[id].sfmAgent.angularVelocity = 0.0;
   }
   else
   {
-    // Change the agent goal
+    float ax0 = agents_[id].sfmAgent.position.getX();
+    float ay0 = agents_[id].sfmAgent.position.getY();
+
     sfm::Goal g;
     g.center.set(rx, ry);
     g.radius = robot_.sfmAgent.radius;
     agents_[id].sfmAgent.goals.push_front(g);
 
-    // change agent vel according to the proximity of the robot
-    // move slowly when close
     float ini_desired_vel = agents_[id].sfmAgent.desiredVelocity;
-    agents_[id].sfmAgent.desiredVelocity = max_vel * (dist / max_dist_view_);  // 1.8
+    float span = std::max(1.0f, max_dist_view_ - static_cast<float>(closest_dist));
+    float t = (dist - static_cast<float>(closest_dist)) / span;
+    if (t < 0.05f)
+      t = 0.05f;
+    if (t > 1.0f)
+      t = 1.0f;
+    agents_[id].sfmAgent.desiredVelocity = max_vel * t;
 
-    // printf("Agent %i approximating robot! dist: %.2f, desiredvel: %.3f\n",
-    // id,
-    //        dist, agents_[id].sfmAgent.desiredVelocity);
-
-    // recompute forces
     computeForces(id);
-    // update position
     sfm::SFM.updatePosition(agents_[id].sfmAgent, dt);
 
-    // restore values just in case the approximation
-    // ends in the next iteration
+    // Radial-only step + real planar velocity so WalkLoop plays (zeroing
+    // velocity.linear caused medical to slide with no animation).
+    {
+      float ax1 = agents_[id].sfmAgent.position.getX();
+      float ay1 = agents_[id].sfmAgent.position.getY();
+      float sx = ax1 - ax0;
+      float sy = ay1 - ay0;
+      float tox = rx - ax0;
+      float toy = ry - ay0;
+      float tn2 = tox * tox + toy * toy;
+      float rad = 0.0f;
+      if (tn2 > 1e-6f)
+      {
+        rad = (sx * tox + sy * toy) / tn2;
+        if (rad < 0.0f)
+          rad = 0.0f;
+        // Cap step so we do not overshoot the stop ring in one tick.
+        float max_rad = 1.0f;
+        if (dist > closest_dist && tn2 > 1e-6f)
+        {
+          float room = static_cast<float>((dist - closest_dist) / sqrtf(tn2));
+          if (room < max_rad)
+            max_rad = std::max(0.0f, room);
+        }
+        if (rad > max_rad)
+          rad = max_rad;
+        agents_[id].sfmAgent.position.set(ax0 + rad * tox, ay0 + rad * toy);
+      }
+      float vx = (agents_[id].sfmAgent.position.getX() - ax0) /
+                 std::max(static_cast<float>(dt), 1e-3f);
+      float vy = (agents_[id].sfmAgent.position.getY() - ay0) /
+                 std::max(static_cast<float>(dt), 1e-3f);
+      utils::Angle face;
+      face.setRadian(atan2(ry - ay0, rx - ax0));
+      agents_[id].sfmAgent.yaw = face;
+      agents_[id].sfmAgent.velocity.set(vx, vy);
+      agents_[id].sfmAgent.linearVelocity = sqrtf(vx * vx + vy * vy);
+      agents_[id].sfmAgent.angularVelocity = 0.0;
+    }
+
     agents_[id].sfmAgent.goals.pop_front();
     agents_[id].sfmAgent.desiredVelocity = ini_desired_vel;
   }
@@ -214,59 +264,95 @@ void AgentManager::blockRobot(int id, double dt, double front_dist)
 
   agents_[id].behavior.state = 1;
 
-  // Robot position
   float rx = robot_.sfmAgent.position.getX();
   float ry = robot_.sfmAgent.position.getY();
-
   float h = robot_.sfmAgent.yaw.toRadian();
-
-  // Store the initial set o goals
-  std::list<sfm::Goal> gls = agents_[id].sfmAgent.goals;
-
-  // Change the agent goal.
-  // We should compute a goal in front of the robot heading.
-  float newgx = rx + front_dist * sin(h);
-  float newgy = ry + front_dist * cos(h);
-  sfm::Goal g;
-  g.center.set(newgx, newgy);
-  g.radius = 0.05;  // robot_.sfmAgent.radius;
-  agents_[id].sfmAgent.goals.push_front(g);
-
-  // We should change the weights of the sfm agent???
-
-  float ini_desired_vel = agents_[id].sfmAgent.desiredVelocity;
-  // gives the agent high vel to pass the robot
-  agents_[id].sfmAgent.desiredVelocity = 2.0;
-
-  // recompute forces
-  computeForces(id);
-  // update position
-  sfm::SFM.updatePosition(agents_[id].sfmAgent, dt);
-
-  // if the agent is close to the robot,
-  // look at the robot
-  // float dist = sqrt(robotSquaredDistance(id));
+  float rvx = robot_.sfmAgent.velocity.getX();
+  float rvy = robot_.sfmAgent.velocity.getY();
+  if ((rvx * rvx + rvy * rvy) > (0.05f * 0.05f))
+    h = atan2(rvy, rvx);
   float ax = agents_[id].sfmAgent.position.getX();
   float ay = agents_[id].sfmAgent.position.getY();
-  float dist = sqrt((rx - ax) * (rx - ax) + (ry - ay) * (ry - ay));
-  if (dist <= 0.6)
-  {
-    // printf("Agent %i stoping and looking at the robot! dist: %.2f\n", id,
-    // dist);
-    // Agent position
-    float ax = agents_[id].sfmAgent.position.getX();
-    float ay = agents_[id].sfmAgent.position.getY();
-    float ah = agents_[id].sfmAgent.yaw.toRadian();
-    // Transform robot position to agent coords system
-    float nrx = (rx - ax) * cos(ah) + (ry - ay) * sin(ah);
-    float nry = -(rx - ax) * sin(ah) + (ry - ay) * cos(ah);
-    utils::Angle robotYaw;  // = utils::Angle::fromRadian(atan2(nry, nrx));
-    robotYaw.setRadian(atan2(nry, nrx));
+  float dist_robot = sqrtf((rx - ax) * (rx - ax) + (ry - ay) * (ry - ay));
 
-    agents_[id].sfmAgent.yaw = agents_[id].sfmAgent.yaw + robotYaw;
+  // Stand-off in front of the robot (YAML behavior.dist, ~1.4 m).
+  //
+  // PATCH (isaac-social-nav): ROS yaw uses (cos, sin). Upstream sin/cos is
+  // 90° off (yaw 0 = +X). An eastbound robot would place "front" 1.4 m north.
+  // Holding then teleports XY there every tick (no PhysX) → wall clip into
+  // adjacent rooms. Isaac robot.yaw is ROS euler. While |v| > 0.05 use travel
+  // heading atan2(vy, vx) so we block where the chassis is going, not a
+  // stale quaternion.
+  //
+  // Not changed here (kinematic SFM limits, still true): holding still
+  // teleports to (newgx,newgy) with v=0 so the body slides with no WalkLoop;
+  // a 180° MPPI/yaw flip pops them behind then ahead; once/duration expiry
+  // falls back to RegularNav and they return to the YAML goal.
+  float newgx = rx + front_dist * cosf(h);
+  float newgy = ry + front_dist * sinf(h);
+  float dist_goal =
+      sqrtf((newgx - ax) * (newgx - ax) + (newgy - ay) * (newgy - ay));
+
+  // PATCH (isaac-social-nav): once close enough to the block pose OR the robot,
+  // pin and face the robot. Previously kept chasing the front goal → walked
+  // into Stretch and strafed with yaw locked (male_adult_police_04).
+  const float stop_r = std::max(0.35f, static_cast<float>(front_dist) * 0.35f);
+  bool holding = threatening_holding_[id];
+  if (!holding && (dist_goal <= stop_r || dist_robot <= front_dist + 0.15f))
+  {
+    threatening_holding_[id] = true;
+    holding = true;
+    // Prefer standing on the front goal if reachable; else current XY.
+    if (dist_goal < 1.5f)
+      threatening_hold_xy_[id] = {newgx, newgy};
+    else
+      threatening_hold_xy_[id] = {ax, ay};
   }
 
-  // restore the goals and the velocity
+  if (holding)
+  {
+    auto hold = threatening_hold_xy_[id];
+    // Keep stand-off in front of the *current* robot pose each tick.
+    hold = {newgx, newgy};
+    threatening_hold_xy_[id] = hold;
+    agents_[id].sfmAgent.position.set(hold.first, hold.second);
+    utils::Angle face;
+    face.setRadian(atan2(ry - hold.second, rx - hold.first));
+    agents_[id].sfmAgent.yaw = face;
+    agents_[id].sfmAgent.velocity.set(0.0, 0.0);
+    agents_[id].sfmAgent.linearVelocity = 0.0;
+    agents_[id].sfmAgent.angularVelocity = 0.0;
+    return;
+  }
+
+  std::list<sfm::Goal> gls = agents_[id].sfmAgent.goals;
+  sfm::Goal g;
+  g.center.set(newgx, newgy);
+  g.radius = 0.25;
+  agents_[id].sfmAgent.goals.push_front(g);
+
+  float ini_desired_vel = agents_[id].sfmAgent.desiredVelocity;
+  agents_[id].sfmAgent.desiredVelocity = 0.85;
+
+  float ax0 = ax;
+  float ay0 = ay;
+  computeForces(id);
+  sfm::SFM.updatePosition(agents_[id].sfmAgent, dt);
+
+  // Face robot; feed planar velocity for WalkLoop.
+  {
+    float ax1 = agents_[id].sfmAgent.position.getX();
+    float ay1 = agents_[id].sfmAgent.position.getY();
+    float vx = (ax1 - ax0) / std::max(static_cast<float>(dt), 1e-3f);
+    float vy = (ay1 - ay0) / std::max(static_cast<float>(dt), 1e-3f);
+    utils::Angle face;
+    face.setRadian(atan2(ry - ay1, rx - ax1));
+    agents_[id].sfmAgent.yaw = face;
+    agents_[id].sfmAgent.velocity.set(vx, vy);
+    agents_[id].sfmAgent.linearVelocity = sqrtf(vx * vx + vy * vy);
+    agents_[id].sfmAgent.angularVelocity = 0.0;
+  }
+
   agents_[id].sfmAgent.goals = gls;
   agents_[id].sfmAgent.desiredVelocity = ini_desired_vel;
 }
@@ -280,11 +366,37 @@ void AgentManager::avoidRobot(int id, double dt, double scary_factor_force, doub
   // we decrease the maximum velocity
   double init_vel = agents_[id].sfmAgent.desiredVelocity;
   agents_[id].sfmAgent.desiredVelocity = max_vel;
+
+  // PATCH (isaac-social-nav): replace patrol goals with a short flee goal away
+  // from the robot. Upstream only added repulsion while still chasing the
+  // waypoint → goal vs scary cancel → stand still, then eventually drift off.
+  std::list<sfm::Goal> saved_goals = agents_[id].sfmAgent.goals;
+  utils::Vector2d away = agents_[id].sfmAgent.position - robot_.sfmAgent.position;
+  double away_n = away.norm();
+  if (away_n < 1e-3)
+  {
+    // Coincident / on top of robot — pick an arbitrary away axis.
+    away.set(1.0, 0.0);
+    away_n = 1.0;
+  }
+  away = away / away_n;
+  sfm::Goal flee;
+  flee.center.set(
+      agents_[id].sfmAgent.position.getX() + away.getX() * 5.0,
+      agents_[id].sfmAgent.position.getY() + away.getY() * 5.0);
+  flee.radius = 0.4;
+  agents_[id].sfmAgent.goals.clear();
+  agents_[id].sfmAgent.goals.push_front(flee);
+
   computeForces(id);
 
   // We add an extra repulsive force from the robot
   utils::Vector2d minDiff = agents_[id].sfmAgent.position - robot_.sfmAgent.position;
   double distance = minDiff.norm() - agents_[id].sfmAgent.radius;
+  if (distance < 0.15)
+  {
+    distance = 0.15;  // avoid huge 1/distance spikes / nan
+  }
 
   utils::Vector2d Scaryforce =
       scary_factor_force * (agents_[id].sfmAgent.params.forceSigmaObstacle / distance) * minDiff.normalized();
@@ -293,8 +405,35 @@ void AgentManager::avoidRobot(int id, double dt, double scary_factor_force, doub
   // update position
   sfm::SFM.updatePosition(agents_[id].sfmAgent, dt);
 
-  // restore desired vel
+  // PATCH (isaac-social-nav): absolute flee heading with slew limit.
+  // Instant face-away snaps ~180° when the robot teleports / passes the agent
+  // (headless probe waypoint jumps showed yaw>90 thrash on Scared).
+  {
+    float ax = agents_[id].sfmAgent.position.getX();
+    float ay = agents_[id].sfmAgent.position.getY();
+    float rx = robot_.sfmAgent.position.getX();
+    float ry = robot_.sfmAgent.position.getY();
+    float desired = atan2(ay - ry, ax - rx);
+    float current = agents_[id].sfmAgent.yaw.toRadian();
+    float diff = desired - current;
+    while (diff > M_PI)
+      diff -= 2.0f * static_cast<float>(M_PI);
+    while (diff < -M_PI)
+      diff += 2.0f * static_cast<float>(M_PI);
+    const float max_step = 0.40f;  // ~23 deg / tick
+    if (diff > max_step)
+      diff = max_step;
+    else if (diff < -max_step)
+      diff = -max_step;
+    utils::Angle face_away;
+    face_away.setRadian(current + diff);
+    agents_[id].sfmAgent.yaw = face_away;
+    agents_[id].sfmAgent.angularVelocity = 0.0;
+  }
+
+  // restore desired vel and patrol goals
   agents_[id].sfmAgent.desiredVelocity = init_vel;
+  agents_[id].sfmAgent.goals = saved_goals;
 }
 
 bool AgentManager::goalReached(int id)
@@ -612,7 +751,11 @@ void AgentManager::computeForces(int id)
         // Compute forces as usual (not taking into account the robot)
         sfm::SFM.computeForces(agents_[id].sfmAgent, otherAgents);
     }
-    agents_[id].behavior.state = 0;
+    // PATCH (isaac-social-nav): do NOT clear behavior.state here.
+    // Scared/Curious/Threatening call computeForces mid-reaction; zeroing
+    // state made getUpdatedAgents report idle so viewport REACTING never
+    // showed (only Threatening hold skipped computeForces). Regular nav
+    // clears state in updatePosition().
   }
   else
   {

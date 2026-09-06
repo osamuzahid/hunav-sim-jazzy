@@ -314,7 +314,15 @@ void BTnode::computeAgentsService(const std::shared_ptr<hunav_msgs::srv::Compute
   double time_step_secs = (rclcpp::Time(ag->header.stamp) - prev_time_).seconds();
   // if the time was reset, we get a negative value
   if (time_step_secs < 0.0)
-    time_step_secs = 0.0;  // 0.05
+    time_step_secs = 0.0;
+  // PATCH (isaac-social-nav): Isaac often calls computeAgents faster than
+  // /clock advances (use_sim_time) → stamp delta 0. TimeExpired then never
+  // accumulates and Surprised (look-at) freezes until restart. Floor tiny/
+  // zero dt so once-duration timers can finish; clamp spikes after pause.
+  if (time_step_secs < 1e-3)
+    time_step_secs = 0.05;
+  else if (time_step_secs > 0.25)
+    time_step_secs = 0.25;
 
   BT::NodeStatus status = tree_tick(time_step_secs);
   prev_time_ = rclcpp::Time(ag->header.stamp);
@@ -374,10 +382,13 @@ void BTnode::moveAgentService(const std::shared_ptr<hunav_msgs::srv::MoveAgent::
     publish_people(t, ag);
 
   double time_step_secs = (rclcpp::Time(ag->header.stamp) - prev_time_).seconds();
-  // time_step_secs = 0.1;
-
-  // RCLCPP_INFO(this->get_logger(), "Time step computed: %.4f",
-  // time_step_secs);
+  if (time_step_secs < 0.0)
+    time_step_secs = 0.0;
+  // Same stamp-stall floor as computeAgentsService (Surprised / once timers).
+  if (time_step_secs < 1e-3)
+    time_step_secs = 0.05;
+  else if (time_step_secs > 0.25)
+    time_step_secs = 0.25;
 
   // we do not tick the tree if the frequency is higher than 100Hz approx
   // if (time_step_secs > 0.008) {

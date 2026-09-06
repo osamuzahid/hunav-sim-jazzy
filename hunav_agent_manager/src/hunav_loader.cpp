@@ -4,12 +4,16 @@
 namespace hunav
 {
 
-// HunavLoader::HunavLoader()
-//     : Node("hunav_loader",
-//            rclcpp::NodeOptions()
-//                .allow_undeclared_parameters(true)
-//                .automatically_declare_parameters_from_overrides(true)) {
-HunavLoader::HunavLoader() : Node("hunav_loader")
+// ORIGINALLY (upstream): Node("hunav_loader") with no options — undeclared YAML
+// keys from Isaac scenarios (plan_goals_on_map, ignore_obstacle_rays, …) can
+// fail param loading on Jazzy.
+// PATCH (isaac-social-nav): allow undeclared parameters so wrapper-only keys in
+// the shared scenario YAML are tolerated; keep explicit declare_parameter for
+// agent fields (do not auto-declare-from-overrides — that double-declares).
+HunavLoader::HunavLoader()
+    : Node(
+          "hunav_loader",
+          rclcpp::NodeOptions().allow_undeclared_parameters(true))
 {
   /* node parameter declaration */
   // std::string base_world = this->declare_parameter<std::string>(

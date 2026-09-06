@@ -23,7 +23,8 @@
     <BehaviorTree ID="CuriousNavTree">
         <Fallback name="CuriousFallback">
             <Sequence name="CurNav"> <!--ReactiveSequence-->
-                <IsRobotVisible agent_id="{id}" distance="10.0" />
+                <!-- PATCH (isaac-social-nav): detect at 3 m (corridor-scale). -->
+                <IsRobotVisible agent_id="{id}" distance="3.0" />
                 <Inverter>
                     <TimeExpiredCondition seconds="{duration}" ts="{dt}" only_once="{once}" />
                 </Inverter>

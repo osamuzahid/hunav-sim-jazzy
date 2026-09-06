@@ -34,6 +34,7 @@
 #include <math.h> /* fabs */
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 // Social Force Model
 #include <lightsfm/sfm.hpp>
@@ -278,6 +279,17 @@ protected:
   float max_dist_view_squared_;
   double time_step_secs_;
   rclcpp::Time prev_time_;
+  // PATCH (isaac-social-nav): Curious stop hysteresis — once inside stop
+  // distance, hold look until past stop+margin (kills boundary surge/thrash).
+  std::unordered_map<int, bool> curious_holding_;
+  std::unordered_map<int, std::pair<float, float>> curious_hold_xy_;
+  // Threatening: pin once at the block stand-off (was walking into the robot
+  // and strafing with yaw locked).
+  std::unordered_map<int, bool> threatening_holding_;
+  std::unordered_map<int, std::pair<float, float>> threatening_hold_xy_;
+  // PATCH (isaac-social-nav): latch IsRobotVisible until past dist+margin so
+  // Scared does not thrash on the detect-radius boundary.
+  std::unordered_map<int, bool> robot_visible_latched_;
   // rclcpp::Clock::SharedPtr clock_;
 
   // std::string pkg_shared_tree_dir_;
