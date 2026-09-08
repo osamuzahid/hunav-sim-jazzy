@@ -1,8 +1,16 @@
 # Human Navigation behavior Simulator (HuNavSim)
 
-HuNavSim is a ROS 2 simulator for human navigation. It controls the navigation behaviour of human agents spawned in a robotics simulator (Gazebo, Webots, Isaac Sim, or another wrapper).
+## Origin
 
-This tree is a **ROS 2 Jazzy** port of [robotics-upo/hunav_sim](https://github.com/robotics-upo/hunav_sim) `v1.0-humble`. Provenance: [UPSTREAM.md](UPSTREAM.md).
+Fork of [robotics-upo/hunav_sim](https://github.com/robotics-upo/hunav_sim) (`v1.0-humble`, `d97ac2c`).
+
+**Why:** upstream is built and tested for ROS 2 Humble. This tree keeps the agent manager, messages, and evaluator usable on **ROS 2 Jazzy** (Ubuntu 24.04) next to Isaac Sim 6.0.1.
+
+**What this tree adds:** Jazzy link/build depends, loader parameters, near-robot behaviour, BT `dt` flooring, and Arena-style `arena_*` metric keys. Pedestrian rendering and Isaac world loading live in the companion wrapper.
+
+SHAs, lightsfm, and `people_msgs`: [UPSTREAM.md](UPSTREAM.md).
+
+HuNavSim is a ROS 2 simulator for human navigation. It controls the navigation behaviour of human agents spawned in a robotics simulator (Gazebo, Webots, Isaac Sim, or another wrapper).
 
 The simulated people are affected by obstacles and other people using the [Social Force Model](https://github.com/robotics-upo/lightsfm) library (**external**; not vendored here). A set of human reactions to the presence of robots is included.
 
