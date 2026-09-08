@@ -159,7 +159,10 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# gitignore template for Jupyter Notebooks
+# colcon
+/install/
+/log/
+
 # website: http://jupyter.org/
 
 .ipynb_checkpoints
